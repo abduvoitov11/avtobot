@@ -16,3 +16,9 @@
     "telegraf": "^4.16.3"
   }
 }
+// Environment variable'dan oladi, agar u bo'lmasa localhostga ulanadi
+const mongoURI = process.env.MONGO_URL || 'mongodb://localhost:27017/bot_db';
+
+mongoose.connect(mongoURI)
+  .then(() => console.log("Bazaga ulandik!"))
+  .catch((err) => console.log("Baza xatosi:", err));
