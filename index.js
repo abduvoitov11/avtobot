@@ -6,22 +6,28 @@ import { chromium } from 'playwright';
 
 // ======== Configuration ========
 
-// It is strongly recommended to set these via environment variables in production.
-const BOT_TOKEN = process.env.BOT_TOKEN || '8375587042:AAEQ5gKtZqJ-dSy39nV2eOwnaVd76772yQ';
-const ADMIN_ID = Number(process.env.ADMIN_ID) || 6291811673;
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/emaktab_bot';
+// Railway Variables bo'limidan olinadi
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const ADMIN_ID = Number(process.env.ADMIN_ID);
+// Railway MongoDB URL o'zgaruvchisini avtomatik aniqlash
+const MONGODB_URI = process.env.MONGODB_URL || process.env.MONGO_URL;
 const LOGIN_URL = 'https://login.emaktab.uz/';
 
-if (!BOT_TOKEN) {
-  console.error('BOT_TOKEN is required. Set it in your environment variables.');
+if (!BOT_TOKEN || !MONGODB_URI) {
+  console.error('❌ XATO: BOT_TOKEN yoki MONGODB_URI topilmadi. Railway Variables sozlamalarini tekshiring!');
   process.exit(1);
 }
 
 // ======== MongoDB Setup ========
 
-await mongoose.connect(MONGODB_URI, {
-  autoIndex: true
-});
+try {
+  await mongoose.connect(MONGODB_URI, {
+    autoIndex: true
+  });
+  console.log('✅ MongoDB-ga muvaffaqiyatli ulandik.');
+} catch (err) {
+  console.error('❌ MongoDB ulanishida xato:', err);
+}
 
 const accountSchema = new mongoose.Schema(
   {
@@ -38,8 +44,8 @@ const Account = mongoose.model('Account', accountSchema);
 
 const bot = new Telegraf(BOT_TOKEN);
 
-// Simple in-memory conversational state for the admin
-const adminState = new Map(); // key: adminId, value: { mode, temp }
+// Admin holatlarini saqlash
+const adminState = new Map();
 
 function ensureAdmin(ctx) {
   const fromId = ctx.from?.id;
@@ -60,33 +66,36 @@ function mainKeyboard() {
 // ======== Playwright Automation ========
 
 async function captureDashboardScreenshot(account) {
+  // Docker muhitida brauzerni ishga tushirish uchun maxsus argumentlar
   const browser = await chromium.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
   });
 
   let buffer = null;
 
   try {
-    const page = await browser.newPage();
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    
+    // Login sahifasiga o'tish
     await page.goto(LOGIN_URL, { waitUntil: 'networkidle' });
 
+    // Formalarni to'ldirish
     await page.fill('input[name="login"]', account.login);
     await page.fill('input[name="password"]', account.password);
 
-    // Click the "Tizimga kirish" button
-    await Promise.all([
-      page.click('button[type="submit"], text=Tizimga kirish'),
-      // Do not await navigation; we must wait exactly 3 seconds
-    ]);
+    // Kirish tugmasini bosish va kutish
+    await page.click('button[type="submit"], text=Tizimga kirish');
+    
+    // Kirgandan keyin ma'lumotlar yuklanishi uchun 5 soniya kutish
+    await page.waitForTimeout(5000);
 
-    // Wait exactly 3 seconds after clicking
-    await page.waitForTimeout(3000);
-
-    // Take full-page screenshot
+    // Skrinshot olish
     buffer = await page.screenshot({ fullPage: true });
+    console.log(`📸 Skrinshot olindi: ${account.name}`);
   } catch (err) {
-    console.error(`Error capturing screenshot for ${account.name} (${account.login}):`, err);
+    console.error(`❌ Xatolik (${account.login}):`, err.message);
   } finally {
     await browser.close();
   }
@@ -95,7 +104,7 @@ async function captureDashboardScreenshot(account) {
 }
 
 async function runScreenshotsForAllAccounts() {
-  console.log('Starting scheduled screenshot task...');
+  console.log('🚀 Rejali vazifa boshlandi...');
   const accounts = await Account.find({});
 
   for (const account of accounts) {
@@ -103,7 +112,7 @@ async function runScreenshotsForAllAccounts() {
     if (!buffer) {
       await bot.telegram.sendMessage(
         ADMIN_ID,
-        `⚠️ ${account.name} (${account.login}) uchun skrinshot olishda xatolik yuz berdi.`
+        `⚠️ ${account.name} (${account.login}) uchun skrinshot olish imkonsiz bo'ldi.`
       );
       continue;
     }
@@ -112,196 +121,90 @@ async function runScreenshotsForAllAccounts() {
       ADMIN_ID,
       { source: buffer },
       {
-        caption: `📸 eMaktab skrinshoti\n👤 ${account.name}\n🔐 Login: ${account.login}`
+        caption: `📸 eMaktab hisoboti\n👤 Ism: ${account.name}\n🔐 Login: ${account.login}`
       }
     );
   }
-
-  console.log('Scheduled screenshot task finished.');
 }
 
 // ======== Cron Scheduling ========
 
-// Every day at 07:45 AM Tashkent time
+// Har kuni 07:45 da (Toshkent vaqti bilan)
 cron.schedule(
   '45 7 * * *',
   () => {
     runScreenshotsForAllAccounts().catch((err) => {
-      console.error('Error in scheduled task:', err);
+      console.error('Cron xatosi:', err);
     });
   },
-  {
-    timezone: 'Asia/Tashkent'
-  }
+  { timezone: 'Asia/Tashkent' }
 );
 
-// ======== Bot Commands & Handlers ========
+// ======== Handlers ========
 
-bot.start(async (ctx) => {
-  await ctx.reply(
-    'Assalomu alaykum! eMaktab avto-skrinshot botiga xush kelibsiz.',
-    mainKeyboard()
-  );
-});
+bot.start((ctx) => ctx.reply('Assalomu alaykum! eMaktab botiga xush kelibsiz.', mainKeyboard()));
 
-bot.hears('➕ Add Account', async (ctx) => {
+bot.hears('➕ Add Account', (ctx) => {
   if (!ensureAdmin(ctx)) return;
-
   adminState.set(ctx.from.id, { mode: 'ADDING_NAME', temp: {} });
-  await ctx.reply('➕ Yangi akkaunt qo‘shish.\nIltimos, o‘quvchi ismini yuboring:');
-});
-
-bot.hears('🗑 Delete account', async (ctx) => {
-  if (!ensureAdmin(ctx)) return;
-
-  const accounts = await Account.find({}).sort({ name: 1 });
-  if (!accounts.length) {
-    await ctx.reply('Bazadan hech qanday akkaunt topilmadi.', mainKeyboard());
-    return;
-  }
-
-  let msg = '🗑 Qaysi akkauntni o‘chirmoqchisiz?\nIsmini yoki loginini yuboring.\n\nMavjud akkauntlar:\n';
-  msg += accounts.map((a) => `• ${a.name} (${a.login})`).join('\n');
-
-  adminState.set(ctx.from.id, { mode: 'DELETING', temp: {} });
-  await ctx.reply(msg);
+  ctx.reply('👤 O‘quvchi ismini yuboring:');
 });
 
 bot.hears('📋 List accounts', async (ctx) => {
   if (!ensureAdmin(ctx)) return;
-
   const accounts = await Account.find({}).sort({ name: 1 });
-  if (!accounts.length) {
-    await ctx.reply('Bazadan hech qanday akkaunt topilmadi.', mainKeyboard());
-    return;
-  }
-
-  const msg =
-    '📋 Akkauntlar ro‘yxati:\n' +
-    accounts.map((a) => `• ${a.name} (${a.login})`).join('\n');
-
-  await ctx.reply(msg, mainKeyboard());
+  if (!accounts.length) return ctx.reply('Baza bo‘sh.');
+  const list = accounts.map(a => `• ${a.name} (${a.login})`).join('\n');
+  ctx.reply(`📋 Ro‘yxat:\n${list}`);
 });
 
-// Generic text handler for multi-step admin flows
+bot.hears('🗑 Delete account', async (ctx) => {
+  if (!ensureAdmin(ctx)) return;
+  adminState.set(ctx.from.id, { mode: 'DELETING' });
+  ctx.reply('🗑 O‘chirmoqchi bo‘lgan akkaunt loginini yuboring:');
+});
+
 bot.on('text', async (ctx) => {
   const fromId = ctx.from?.id;
-  if (fromId !== ADMIN_ID) {
-    // Non-admins can only use /start and see the menu; ignore other texts
-    return;
-  }
+  if (fromId !== ADMIN_ID) return;
 
   const state = adminState.get(fromId);
-  if (!state) return; // nothing in progress
+  if (!state) return;
 
   const text = ctx.message.text.trim();
 
   if (state.mode === 'ADDING_NAME') {
     state.temp.name = text;
     state.mode = 'ADDING_LOGIN';
-    adminState.set(fromId, state);
-    await ctx.reply('🔐 Endi loginni yuboring:');
-    return;
-  }
-
-  if (state.mode === 'ADDING_LOGIN') {
+    ctx.reply('🔐 Loginni yuboring:');
+  } else if (state.mode === 'ADDING_LOGIN') {
     state.temp.login = text;
     state.mode = 'ADDING_PASSWORD';
-    adminState.set(fromId, state);
-    await ctx.reply('🔑 Endi parolni yuboring:');
-    return;
-  }
-
-  if (state.mode === 'ADDING_PASSWORD') {
-    state.temp.password = text;
-
+    ctx.reply('🔑 Parolni yuboring:');
+  } else if (state.mode === 'ADDING_PASSWORD') {
     try {
-      const account = new Account({
-        name: state.temp.name,
-        login: state.temp.login,
-        password: state.temp.password
-      });
-      await account.save();
-
-      await ctx.reply(
-        `✅ Akkaunt qo‘shildi:\n👤 ${account.name}\n🔐 Login: ${account.login}`,
-        mainKeyboard()
-      );
-    } catch (err) {
-      console.error('Error saving account:', err);
-      if (err.code === 11000) {
-        await ctx.reply(
-          '❌ Bu login bilan akkaunt allaqachon mavjud. Iltimos, boshqa login kiriting.',
-          mainKeyboard()
-        );
-      } else {
-        await ctx.reply('❌ Akkauntni saqlashda xatolik yuz berdi.', mainKeyboard());
-      }
-    } finally {
-      adminState.delete(fromId);
+      await Account.create({ ...state.temp, password: text });
+      ctx.reply('✅ Saqlandi!', mainKeyboard());
+    } catch (e) {
+      ctx.reply('❌ Xato (login band bo‘lishi mumkin).');
     }
-
-    return;
-  }
-
-  if (state.mode === 'DELETING') {
-    const query = text;
-    const account = await Account.findOne({
-      $or: [{ name: query }, { login: query }]
-    });
-
-    if (!account) {
-      await ctx.reply(
-        '❌ Bu nom yoki login bo‘yicha akkaunt topilmadi. Qaytadan urinib ko‘ring yoki /start bosing.',
-        mainKeyboard()
-      );
-      adminState.delete(fromId);
-      return;
-    }
-
-    await Account.deleteOne({ _id: account._id });
-    await ctx.reply(
-      `✅ Akkaunt o‘chirildi:\n👤 ${account.name}\n🔐 Login: ${account.login}`,
-      mainKeyboard()
-    );
     adminState.delete(fromId);
-    return;
+  } else if (state.mode === 'DELETING') {
+    const res = await Account.deleteOne({ login: text });
+    ctx.reply(res.deletedCount ? '✅ O‘chirildi.' : '❌ Topilmadi.', mainKeyboard());
+    adminState.delete(fromId);
   }
 });
 
-// ======== Graceful Shutdown (prevents 409 on Railway) ========
+// ======== Shutdown ========
 
-process.once('SIGINT', async () => {
-  try {
-    await mongoose.connection.close();
-    console.log('MongoDB connection closed.');
-  } catch (err) {
-    console.error('Error closing MongoDB connection:', err);
-  }
+const closeBases = async () => {
+  await mongoose.connection.close();
+  console.log('Baza yopildi.');
+  process.exit(0);
+};
 
-  bot.stop('SIGINT');
-});
+process.once('SIGINT', closeBases);
+process.once('SIGTERM', closeBases);
 
-process.once('SIGTERM', async () => {
-  try {
-    await mongoose.connection.close();
-    console.log('MongoDB connection closed.');
-  } catch (err) {
-    console.error('Error closing MongoDB connection:', err);
-  }
-
-  bot.stop('SIGTERM');
-});
-
-// ======== Start Bot (Long Polling) ========
-
-bot
-  .launch()
-  .then(() => {
-    console.log('Bot started successfully.');
-  })
-  .catch((err) => {
-    console.error('Failed to launch bot:', err);
-    process.exit(1);
-  });
-
+bot.launch().then(() => console.log('🤖 Bot ishga tushdi...'));
