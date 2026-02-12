@@ -269,22 +269,9 @@ bot.on('text', async (ctx) => {
   }
 });
 
-// ======== Graceful Shutdown ========
+// ======== Graceful Shutdown (prevents 409 on Railway) ========
 
-let isShuttingDown = false;
-
-async function shutdown(signal) {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-
-  console.log(`Received ${signal}. Shutting down gracefully...`);
-
-  try {
-    await bot.stop(signal);
-  } catch (err) {
-    console.error('Error stopping bot:', err);
-  }
-
+process.once('SIGINT', async () => {
   try {
     await mongoose.connection.close();
     console.log('MongoDB connection closed.');
@@ -292,11 +279,19 @@ async function shutdown(signal) {
     console.error('Error closing MongoDB connection:', err);
   }
 
-  process.exit(0);
-}
+  bot.stop('SIGINT');
+});
 
-process.once('SIGINT', () => shutdown('SIGINT'));
-process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.once('SIGTERM', async () => {
+  try {
+    await mongoose.connection.close();
+    console.log('MongoDB connection closed.');
+  } catch (err) {
+    console.error('Error closing MongoDB connection:', err);
+  }
+
+  bot.stop('SIGTERM');
+});
 
 // ======== Start Bot (Long Polling) ========
 
